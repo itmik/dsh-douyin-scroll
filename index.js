@@ -28,7 +28,7 @@ const z = hostDeps.z
 const defineTool = hostDeps.defineTool
 import { spawn } from 'node:child_process'
 import { appendFileSync, cpSync, existsSync, mkdirSync, readdirSync, readFileSync, rmSync, statSync, writeFileSync } from 'node:fs'
-import { join, dirname } from 'node:path'
+import { join, dirname, resolve as resolvePath } from 'node:path'
 import { createRequire } from 'node:module'
 import { fileURLToPath } from 'node:url'
 import { WINDOWS, stateDirOf, readJson, writeJson, ensureHomeFiles, ensureCharter, inWindow, dayKey } from './lib/state.mjs'
@@ -174,6 +174,22 @@ export function apply(ctx, config) {
   }
 
   // ── dsh CLI 探测 ────────────────────────────────────────────────────────
+  const isWin = process.platform === 'win32'
+  const asarCandidates = () => {
+    // 桌面版把 dsh 打在 app.asar 里（Electron 才能读 asar；从这里跑就是原生 Node，读不到 ⇒ 靠 .cmd 解析兜底）
+    const roots = []
+    if (process.resourcesPath) roots.push(process.resourcesPath)
+    try { roots.push(join(dirname(process.execPath), 'resources')) } catch { /* 跳过 */ }
+    const out = []
+    for (const root of roots) {
+      if (!root) continue
+      out.push(
+        join(root, 'app.asar', 'dsh', 'node_modules', '@deepseek-ai', 'dsh', 'lib', 'bin.js'),
+        join(root, 'app.asar', 'dsh', 'node_modules', '@deepseek-ai', 'dsh-desktop-host', 'lib', 'cli.js'),
+      )
+    }
+    return out
+  }
   const findDshCli = () => {
     const explicit = String(cfg.dshBin || '').trim()
     if (explicit && existsSync(explicit)) return explicit
@@ -187,6 +203,7 @@ export function apply(ctx, config) {
       join(process.env.APPDATA || '', 'npm', 'node_modules', '@deepseek-ai', 'dsh', 'lib', 'bin.js'),
       join(process.env.ProgramFiles || '', 'nodejs', 'node_modules', '@deepseek-ai', 'dsh', 'lib', 'bin.js'),
     ].filter(Boolean)) if (existsSync(g)) return g
+    for (const p of asarCandidates()) { try { if (existsSync(p)) return p } catch { /* 跳过 */ } }
     // 桌面版：应用目录里有界搜
     const roots = []
     if (process.resourcesPath) roots.push(process.resourcesPath)
@@ -235,11 +252,55 @@ export function apply(ctx, config) {
     dshCache = { v, at: now }
     return v
   }
+  /**
+   * ⭐ .cmd / .bat 在 Windows 上**不能**直接 spawn（shell:false ⇒ EINVAL）。
+   *   桌面版装的那份 dsh 就是个批处理壳，里面写着真正的命令：
+   *     "…\DeepSeek Harness.exe" --expose-internals "…\app.asar\dsh\…\cli.js" %*
+   *   ⇒ 把壳读开，取出 exe + js（+ exe 前面那些 flag），照原样起进程。
+   *   ⚠️ 绝不用 shell:true 去跑它：提示词是当参数传的，经 cmd.exe 解析就有注入面。
+   */
+  const fromShim = (shim) => {
+    try {
+      const dir = dirname(shim)
+      // %~dp0 是"脚本所在目录 + \"
+      const text = readFileSync(shim, 'utf8').split('%~dp0').join(dir + (dir.endsWith('\\') ? '' : '\\'))
+      const quoted = [...text.matchAll(/"([^"]+)"/g)].map((m) => m[1])
+      const exeRel = quoted.find((q) => /\.exe$/i.test(q))
+      const jsRel = quoted.find((q) => /\.js$/i.test(q))
+      if (!exeRel || !jsRel) return null
+      const exe = resolvePath(dir, exeRel)
+      const js = resolvePath(dir, jsRel)
+      // asar 里的 js 只有 Electron 读得到；从原生 Node 看 exists 会 false ⇒ 只校验 exe
+      if (!existsSync(exe)) return null
+      // 壳里 js 前面那些 flag（桌面版要 --expose-internals）要原样带过去
+      const flags = (text.slice(0, text.indexOf(jsRel)).match(/--[a-z][a-z-]*/gi) || [])
+      return { command: exe, args: [...flags, js], electron: true, via: shim }
+    } catch { return null }
+  }
+  /** js 入口 ⇒ 用跑插件的那个 node 去起（Electron 里就是它自己 + ELECTRON_RUN_AS_NODE） */
+  const fromJs = (js) => ({
+    command: process.execPath,
+    args: [/[\\/]cli\.js$/i.test(js) ? '--expose-internals' : null, js].filter(Boolean),
+    shell: false,
+    electron: Boolean(process.versions.electron) || /\.asar[\\/]/i.test(js),
+  })
   const resolveDsh = () => {
     const cli = dshCliCached()
-    if (cli) return { command: process.execPath, args: [cli], shell: false }
-    const onPath = findOnPath(process.platform === 'win32' ? ['dsh.cmd', 'dsh.exe', 'dsh.bat', 'dsh'] : ['dsh'])
-    if (onPath) return { command: onPath, args: [], shell: false, fallback: true }
+    if (cli) return fromJs(cli)
+    // 兜底：PATH 里那份（桌面版的 dsh.cmd 就在这儿）
+    const onPath = findOnPath(isWin ? ['dsh.exe', 'dsh.cmd', 'dsh.bat', 'dsh'] : ['dsh'])
+    if (onPath) {
+      if (/\.(cmd|bat)$/i.test(onPath)) {
+        const shim = fromShim(onPath)
+        if (shim) { log(`从 ${onPath} 里解析出真正的 dsh 入口：${shim.command}`); return shim }
+        return {
+          missing: true,
+          hint: `PATH 里只有批处理 ${onPath}，但没能从里面解析出可执行入口 —— 可以直接把「dsh 路径」填成应用目录里的 …/@deepseek-ai/dsh/lib/bin.js`,
+        }
+      }
+      if (/\.js$/i.test(onPath)) return fromJs(onPath)
+      return { command: onPath, args: [], shell: false, fallback: true, electron: /\.exe$/i.test(onPath) }
+    }
     return { missing: true, hint: '没找到 dsh：可以把「dsh 路径」填成 <应用目录>/…/@deepseek-ai/dsh/lib/bin.js' }
   }
 
@@ -276,7 +337,11 @@ export function apply(ctx, config) {
    *   它内部复用同一套 lib/api.mjs，并且**连宿主已经开着的浏览器**（不再抢 profile 锁）。
    */
   const mcpWhitelist = () => {
-    const list = ['dy_whoami', 'dy_search', 'dy_video', 'dy_comments', 'dy_user', 'dy_user_posts']
+    // 读工具 + 三个写入工具（值班轮没有 fs，写报告只能靠它们；都锁在家目录里）
+    const list = [
+      'dy_whoami', 'dy_search', 'dy_video', 'dy_comments', 'dy_user', 'dy_user_posts',
+      'duty_paths', 'duty_report_append', 'duty_seen_append', 'duty_seen_recent', 'duty_digest_append',
+    ]
     if (cfg.autoComment && cfg.mentionName) list.push('dy_comment')
     return list
   }
@@ -322,6 +387,7 @@ export function apply(ctx, config) {
       '        env:',
       // 桌面版的 process.execPath 是 Electron 本体：不带这个变量它就当自己是 GUI 启动
       "          ELECTRON_RUN_AS_NODE: '1'",
+      '          DOUYIN_DUTY_HOME: ' + yq(posix(stateDir)),
       '          DOUYIN_MCP_TOOLS: ' + yq(mcpWhitelist().join(',')),
       '',
     )
@@ -419,7 +485,7 @@ export function apply(ctx, config) {
         shell: false,
         windowsHide: true,
         stdio: ['ignore', 'pipe', 'pipe'],
-        env: { ...process.env, DOUYIN_DUTY_HOME: stateDir, ...(process.versions.electron ? { ELECTRON_RUN_AS_NODE: '1' } : {}) },
+        env: { ...process.env, DOUYIN_DUTY_HOME: stateDir, ...(dsh.electron || process.versions.electron ? { ELECTRON_RUN_AS_NODE: '1' } : {}) },
       })
       const toText = (buf) => {
         try {

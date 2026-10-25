@@ -30,6 +30,32 @@ Node 里 `fetch` 抖音接口 → 404 `Unsupported path(Janus)`，哪怕 cookie 
 值班轮是**无人值守**的，跑在 stock profile 上等于给了一个没有监督的 shell。
 **不要为了调试方便把它删掉或放宽。**
 
+⚠️ 正因为它没有 fs，**写报告只能走 MCP 的 `duty_*` 工具**（见 `lib/mcp-server.mjs`：
+`duty_report_append` / `duty_seen_append` / `duty_seen_recent` / `duty_digest_append`）。
+章程里提到的每个写动作都必须能对上其中一个工具 —— 改了章程忘了加工具，那一轮就什么都写不出来
+（这个坑在 v0.1.0 真踩过：章程说"写进 out/…"，但那一轮根本没有能写文件的工具）。
+
+## 两条真出过事的坑
+
+### `dsh` 在桌面上是个 `.cmd`，不能直接 spawn
+
+`shell: false` 下 spawn `.cmd`/`.bat` 在 Windows 上必然 `EINVAL`。桌面版装的 `dsh`
+正是批处理壳，真正的命令写在壳里：
+
+```
+"…\DeepSeek Harness.exe" --expose-internals "…\app.asar\dsh\…\dsh-desktop-host\lib\cli.js" %*
+```
+
+⇒ `index.js` 的 `fromShim()` 把壳读开、取出 exe + js + flag 再起进程。
+**不要改成 `shell: true`**：提示词是当参数传的，经 cmd.exe 解析就是命令注入面。
+
+### `playwright-core` 会被 pnpm 顺手剪掉
+
+它不是本包的直接依赖 —— 任何一次 `dsh plugin add/remove` 都可能把它当"多余包"删掉
+（实测：装本插件那次 pnpm `-16`，抖音工具层当场全废，报告里只剩一句"找不到 playwright-core"）。
+⇒ **显式装一次** `dsh plugin --profile desktop add playwright-core`；
+`resolvePlaywright()` 必须能在所有 profile 的 node_modules（含 pnpm `.pnpm` 布局）里找。
+
 ## 配置字段的规矩
 
 - 每个字段都要 `.extra('volatile', true)` —— DSH 的 `settings.update()` 只认 volatile 字段。

@@ -46,8 +46,18 @@ dsh plugin --profile web add link:/path/to/dsh-douyin-scroll
 
 装完**重启 DSH**，去 `设置 → 刷抖音`。
 
-依赖 `playwright-core`：插件会先找
-`~/.dsh/profiles/desktop/node_modules/playwright-core`（桌面版自带），找不到就报错让你装。
+依赖 `playwright-core`：插件会挨个 profile 找
+（`~/.dsh/profiles/*/node_modules/playwright-core`，含 pnpm 的 `.pnpm` 布局），
+最后才找自己的 `~/.dsh/douyin-duty/node_modules`。全都没有就报错并告诉你装：
+
+```bash
+dsh plugin --profile desktop add playwright-core
+```
+
+⚠️ 它是**运行时依赖**，请务必显式装一次：不装的话，任何一次 `dsh plugin add/remove`
+都可能被 pnpm 当"多余包"顺手剪掉（我们踩过这个坑 —— 装插件的同一秒把别的插件依赖的
+playwright-core 剪了，于是整个抖音工具层全废）。
+
 浏览器用 **Microsoft Edge**（`channel: 'msedge'`），不用另装 Chromium。
 
 ---
@@ -92,6 +102,21 @@ dsh plugin --profile web add link:/path/to/dsh-douyin-scroll
 | `dy_status` | 今天跑了没跑、挑了几条、额度剩多少、下次窗口何时开 |
 | `dy_run` | 立刻跑一轮（不等窗口） |
 | `dy_config` | 读 / 改设置 |
+
+### 值班轮专用的写工具
+
+值班轮跑在**最小权限 profile** 上（没有 fs、没有 shell）—— 它写不了文件。
+所以「写报告」这件事由随包的 MCP server 代劳，只暴露三个写入工具，全部锁在家目录里：
+
+| 工具 | 干什么 |
+|---|---|
+| `duty_paths` | 三个文件的绝对路径（日报 / 判重表 / 归档） |
+| `duty_report_append` | 往今天的日报追加一段 markdown |
+| `duty_seen_append` | 往判重表追加一行（挑了 / 跳过 / 评论） |
+| `duty_seen_recent` | 读判重表最近几行（挑之前先查重） |
+| `duty_digest_append` | 往本月归档追加一段 |
+
+这几个跟 `dy_*` 一样是 MCP 工具，但**只在值班轮里可见**（宿主里没有注册它们）。
 
 ### 关于 `dy_comment` 的闸
 

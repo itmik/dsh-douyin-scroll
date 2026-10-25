@@ -841,7 +841,8 @@ export function apply(ctx, config) {
   }
 
   try {
-    ctx.effect(() => ctx.webServer.register({
+    // 挂载形状抄 bili 2.1.0：ctx.effect(() => register(...), 标签) —— 宿主会**立即执行**注册回调
+    const register = () => ctx.webServer.register({
       kind: 'prefix',
       path: '/api/douyin-duty',
       handler: async (req, res) => {
@@ -858,7 +859,17 @@ export function apply(ctx, config) {
           try { sendJson(res, 500, { ok: false, error: String(err?.message ?? err) }) } catch { /* 断 */ }
         }
       },
-    }), 'douyin-duty: /api/douyin-duty 路由')
+    })
+    if (typeof ctx.effect === 'function') {
+      // 宿主（2.1-rc）里 effect(fn, 标签) 会立即执行 fn；
+      // 个别版本的 effect 只登记 teardown（fn 返回清理函数）——两种都兼容。
+      // （apply 不是 async，返回 promise 的 effect 就不 await——宿主同步执行，不依赖它的返回值）
+      const out = ctx.effect(register, 'douyin-duty: /api/douyin-duty 路由')
+      if (out && typeof out.then === 'function') out.then(() => {}, () => {})
+    } else {
+      register()
+    }
+    log('HTTP 路由已挂载：/api/douyin-duty（prefix + 信任栅栏）')
   } catch (e) {
     // 宿主只认函数形式的老接口就降级用它（行为一样，只是没走 effect 生命周期）
     if (ctx.webServer?.register) {

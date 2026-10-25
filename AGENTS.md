@@ -88,9 +88,20 @@ window.__ModuleLoader__.load({ id: 'dsh-douyin-scroll', factory: (require) => ({
 node selfcheck.mjs      # 离线：host 半端 / client 半端 / 随包文件
 ```
 
-自检过了还不够 —— 数据层要真验：
+自检过了还不够 —— 数据层要真验。**先别重启**，用一个脚本就能把 host 半端拉起来：
 
-1. 装进 profile（`dsh plugin --profile web add link:...`），重启。
+```bash
+node scripts/e2e-host.mjs            # 工具注册 + 状态 + 三条 HTTP 路由
+node scripts/e2e-host.mjs --run      # 再真跑一轮（会开浏览器，几分钟）
+```
+
+它能验的：11 个工具都在、`dy_status` 结构对、设置页那三个路由返回 200。
+⚠️ 它跑在 plain node 里，`status().dshCli` 会是空串（`process.resourcesPath` 不存在）——
+这不是 bug，装进应用里就有值。
+
+装进应用里之后要验的：
+
+1. `dsh plugin --profile desktop add link:...`，重启。
 2. `dy_whoami` 看登录态。
 3. `dy_search` 搜个词，看返回结构。
 4. `dy_run` 跑一轮，看 `~/.dsh/douyin-duty/out/<今天>.md` 有没有 `### <aweme_id>` 行。

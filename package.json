@@ -27,7 +27,8 @@
     "README.md",
     "AGENTS.md",
     "selfcheck.mjs",
-    "LICENSE"
+    "LICENSE",
+    "scripts"
   ],
   "engines": {
     "dsh": ">=0.1.7-rc.1",

@@ -738,54 +738,139 @@ export function apply(ctx, config) {
     req.on('error', () => resolve({}))
   })
 
-  if (ctx.webServer?.register) {
-    ctx.webServer.register((req, res) => {
-      let url
-      try { url = new URL(req.url, 'http://localhost') } catch { return sendJson(res, 400, { ok: false }) }
-      const path = url.pathname
-      if (!path.startsWith('/api/douyin-duty/')) return   // 不是我们的路由
+  // 本机同源这道兜底（信任栅栏拿不到时用；也挡浏览器里别的网页）
+  const sameOriginOk = (req) => {
+    try {
+      const host = String(req.headers.host || '')
+      if (!host) return true
+      if (!/^(127\.0\.0\.1|localhost|\[::1\])(:\d+)?$/i.test(host)) return false
+      const pick = String(req.headers.origin || req.headers.referer || '')
+      if (!pick) return true
+      const u = new URL(pick)
+      // 端口也要比：本机另一个端口的页面不能驱动这些写接口
+      const originAuthority = String(u.host || '').toLowerCase()
+      const hostAuthority = String(host).toLowerCase()
+      if (originAuthority && originAuthority === hostAuthority) return true
+      const defaultPort = u.protocol === 'https:' ? '443' : '80'
+      return (u.hostname + ':' + (u.port || defaultPort)).toLowerCase() === hostAuthority
+    } catch { return false }
+  }
 
-      ;(async () => {
-        refreshCfg()
-        if (req.method === 'GET' && path === '/api/douyin-duty/status') return sendJson(res, 200, status())
-        if (req.method === 'GET' && path === '/api/douyin-duty/config') {
-          return sendJson(res, 200, { ok: true, config: cfg, windows: WINDOWS, home: stateDir })
+  // DSH 自己的信任栅栏（真鉴权，认 cookie/token）：
+  // requestRejection({ headers }) → undefined = 放行；数字 = 回那个状态码（通常 401）
+  let connCached = null
+  let connTried = false
+  let fenceWarned = false
+  const getConnection = () => {
+    if (connTried) return connCached
+    connTried = true
+    for (const [how, fn] of [
+      ['ctx.get("connection")', () => (typeof ctx.get === 'function' ? ctx.get('connection') : null)],
+      ['Reflect.get(ctx, "connection")', () => Reflect.get(ctx, 'connection')],
+      ['ctx.root.connection', () => (ctx.root && typeof ctx.root === 'object' ? ctx.root.connection : null)],
+    ]) {
+      try {
+        const c = fn()
+        if (c && typeof c.requestRejection === 'function') { connCached = c; log('信任栅栏：用 ' + how + ' 拿到了 connection 服务 ✓'); return c }
+      } catch { /* 换下一个 */ }
+    }
+    log('⚠️ 三种写法都拿不到 connection.requestRejection ⇒ 退回"本机同源"这一道')
+    return null
+  }
+  const fenceReject = (req, res) => {
+    const conn = getConnection()
+    if (!conn) {
+      if (!fenceWarned) { fenceWarned = true; log('⚠️ 拿不到 DSH 信任栅栏（connection.requestRejection）⇒ 退回本机同源这一道') }
+      return false
+    }
+    try {
+      const rejection = conn.requestRejection({ headers: req.headers })
+      if (rejection === undefined) return false
+      try {
+        res.writeHead(rejection, { 'content-type': 'text/plain; charset=utf-8' })
+        res.end()
+      } catch { /* 连接已断 */ }
+      return true
+    } catch (err) {
+      log('信任栅栏调用出错，按不通过处理：' + String(err?.message ?? err))
+      try { res.writeHead(403); res.end() } catch { /* 忽略 */ }
+      return true
+    }
+  }
+
+  const handle = async (req, res, url) => {
+    const path = url.pathname
+    refreshCfg()
+    if (req.method === 'GET' && path === '/api/douyin-duty/status') return sendJson(res, 200, status())
+    if (req.method === 'GET' && path === '/api/douyin-duty/config') {
+      return sendJson(res, 200, { ok: true, config: cfg, windows: WINDOWS, home: stateDir })
+    }
+    if (req.method === 'POST' && path === '/api/douyin-duty/config') {
+      const body = await readBody(req)
+      const { clean, host } = persistCfg(body || {})
+      return sendJson(res, 200, { ok: true, config: cfg, applied: clean, host })
+    }
+    if (req.method === 'POST' && path === '/api/douyin-duty/run') {
+      return sendJson(res, 200, { ok: true, ...runDuty('manual') })
+    }
+    if (req.method === 'POST' && path === '/api/douyin-duty/chrome') {
+      const page = await ensurePage()
+      try { await page.bringToFront() } catch { /* 无头 */ }
+      return sendJson(res, 200, { ok: true, ...(await api.whoami()) })
+    }
+    if (req.method === 'GET' && path === '/api/douyin-duty/whoami') {
+      return sendJson(res, 200, await api.whoami())
+    }
+    if (req.method === 'GET' && path === '/api/douyin-duty/report') {
+      const day = String(url.searchParams.get('day') || dayKey()).replace(/[^0-9-]/g, '') || dayKey()
+      const file = join(outDir, day + '.md')
+      let text = ''
+      let exists = false
+      try { exists = existsSync(file); if (exists) text = readFileSync(file, 'utf8').slice(0, 200000) } catch { /* 空 */ }
+      return sendJson(res, 200, { ok: true, day, exists, file, text })
+    }
+    if (req.method === 'POST' && path === '/api/douyin-duty/open') {
+      const body = await readBody(req)
+      const what = String(body?.what || 'out')
+      const dir = what === 'home' ? stateDir : outDir
+      if (process.platform !== 'win32') return sendJson(res, 200, { ok: false, error: '这个按钮目前只做了 Windows' })
+      spawn('cmd.exe', ['/c', 'start', '', dir], { detached: true, stdio: 'ignore' }).on('error', () => {})
+      return sendJson(res, 200, { ok: true, opened: dir })
+    }
+    return sendJson(res, 404, { ok: false, error: 'unknown path ' + path })
+  }
+
+  try {
+    ctx.effect(() => ctx.webServer.register({
+      kind: 'prefix',
+      path: '/api/douyin-duty',
+      handler: async (req, res) => {
+        // ① 先过 DSH 的信任栅栏（真鉴权，返回 401 的那个机制）
+        if (fenceReject(req, res)) return
+        // ② 再过本机同源（栅栏拿不到时的兜底，也挡浏览器里别的网页）
+        if (!sameOriginOk(req)) {
+          try { sendJson(res, 403, { ok: false, error: '只接受本机同源请求' }) } catch { /* 忽略 */ }
+          return
         }
-        if (req.method === 'POST' && path === '/api/douyin-duty/config') {
-          const body = await readBody(req)
-          const { clean, host } = persistCfg(body || {})
-          return sendJson(res, 200, { ok: true, config: cfg, applied: clean, host })
+        try {
+          await handle(req, res, new URL(req.url, 'http://127.0.0.1'))
+        } catch (err) {
+          try { sendJson(res, 500, { ok: false, error: String(err?.message ?? err) }) } catch { /* 断 */ }
         }
-        if (req.method === 'POST' && path === '/api/douyin-duty/run') {
-          return sendJson(res, 200, { ok: true, ...runDuty('manual') })
-        }
-        if (req.method === 'POST' && path === '/api/douyin-duty/chrome') {
-          const page = await ensurePage()
-          try { await page.bringToFront() } catch { /* 无头 */ }
-          return sendJson(res, 200, { ok: true, ...(await api.whoami()) })
-        }
-        if (req.method === 'GET' && path === '/api/douyin-duty/whoami') {
-          return sendJson(res, 200, await api.whoami())
-        }
-        if (req.method === 'GET' && path === '/api/douyin-duty/report') {
-          const day = String(url.searchParams.get('day') || dayKey()).replace(/[^0-9-]/g, '') || dayKey()
-          const file = join(outDir, day + '.md')
-          let text = ''
-          let exists = false
-          try { exists = existsSync(file); if (exists) text = readFileSync(file, 'utf8').slice(0, 200000) } catch { /* 空 */ }
-          return sendJson(res, 200, { ok: true, day, exists, file, text })
-        }
-        if (req.method === 'POST' && path === '/api/douyin-duty/open') {
-          const body = await readBody(req)
-          const what = String(body?.what || 'out')
-          const dir = what === 'home' ? stateDir : outDir
-          if (process.platform !== 'win32') return sendJson(res, 200, { ok: false, error: '这个按钮目前只做了 Windows' })
-          spawn('cmd.exe', ['/c', 'start', '', dir], { detached: true, stdio: 'ignore' }).on('error', () => {})
-          return sendJson(res, 200, { ok: true, opened: dir })
-        }
-        return sendJson(res, 404, { ok: false, error: 'unknown path ' + path })
-      })().catch((e) => { try { sendJson(res, 500, { ok: false, error: String(e?.message ?? e) }) } catch { /* 断 */ } })
-    })
+      },
+    }), 'douyin-duty: /api/douyin-duty 路由')
+  } catch (e) {
+    // 宿主只认函数形式的老接口就降级用它（行为一样，只是没走 effect 生命周期）
+    if (ctx.webServer?.register) {
+      try {
+        ctx.webServer.register((req, res) => {
+          const url = new URL(req.url, 'http://127.0.0.1')
+          if (!url.pathname.startsWith('/api/douyin-duty/')) return
+          handle(req, res, url).catch(() => {})
+        })
+        log('HTTP 路由用旧函数形式挂上了（宿主不认 {kind,path,handler}）')
+      } catch (e2) { log(`HTTP 路由没挂上：${e?.message ?? e} / ${e2?.message ?? e2}`) }
+    } else log('HTTP 路由没挂上：' + String(e?.message ?? e))
   }
 
   log(`douyin-scroll 已挂载：home=${stateDir} profile=${effectiveProfile()}（模板 ${dutyProfileState}）`)

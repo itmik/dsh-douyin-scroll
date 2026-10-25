@@ -48,11 +48,48 @@ try {
     get: (k) => (k === 'dshHomePath' ? () => tmpHome : undefined),
     effect: (fn) => { effects.push(fn) },
     tools: { register: (t) => { registered.push(t); return t } },
-    webServer: { register: (fn) => { routes.push(fn) } },
+    webServer: { register: (spec) => { routes.push(spec) } },
     settings: { describe: () => ({}), update: () => {} },
   }
   mod.apply(ctx, {})
-  ok('apply() 没抛异常', `注册了 ${registered.length} 个工具、${routes.length} 条路由`)
+  // effect 可能是「登记清理函数」（0 参）也可能是「立即执行的注册回调」——两种都跑一遍，
+  // 宿主里前者收 teardown、后者做挂载（抄 bili 的写法就是后者）。
+  let ranEffects = 0
+  for (const fn of effects) { if (typeof fn === 'function') { try { fn() } catch { /* 清理回调没有副作用可跑 */ } ranEffects++ } }
+  ok('apply() 没抛异常', `注册了 ${registered.length} 个工具、${routes.length} 条路由（跑了 ${ranEffects} 个 effect）`)
+
+  // 路由形状：宿主认 {kind:'prefix', path, handler}（抄 bili 2.0.4+）
+  const prefix = routes.find((r) => r && typeof r === 'object' && r.kind === 'prefix' && r.path === '/api/douyin-duty')
+  if (prefix && typeof prefix.handler === 'function') {
+    ok('HTTP 路由是 prefix 形状', 'handler 存在')
+    // 直接打一遍 handler，不碰网络：假 req/res（带 writeHead，sendJson 需要它）
+    const mkRes = () => {
+      const chunks = []
+      return {
+        statusCode: 0, headers: {},
+        setHeader(k, v) { this.headers[k] = v },
+        writeHead(c, h) { this.statusCode = c; Object.assign(this.headers, h || {}) },
+        end(s) { chunks.push(s ?? ''); this._body = chunks.join('') },
+        write(s) { chunks.push(s) },
+      }
+    }
+    const hit = async (url, method = 'GET', headers = {}) => {
+      const res = mkRes()
+      await prefix.handler({ method, url, headers, on: () => {} }, res)
+      return { code: res.statusCode, body: res._body || '' }
+    }
+    const st = await hit('/api/douyin-duty/status')
+    if (st.code === 200 && st.body.startsWith('{"ok":true')) ok('handler: GET /status → 200', st.body.slice(0, 40))
+    else bad('handler: GET /status', `${st.code} ${st.body.slice(0, 120)}`)
+    const unk = await hit('/api/douyin-duty/no-such-route')
+    if (unk.code === 404) ok('handler: 未知路径 → 404')
+    else bad('handler: 未知路径', `期望 404，实际 ${unk.code}`)
+    const x = await hit('/api/douyin-duty/status', 'GET', { host: '127.0.0.1:3108', origin: 'http://evil.local:9999' })
+    if (x.code === 403) ok('handler: 跨源请求 → 403（同源栅栏）')
+    else bad('handler: 跨源请求', `期望 403，实际 ${x.code}`)
+  } else {
+    bad('HTTP 路由形状', '没找到 {kind:prefix, path:/api/douyin-duty, handler}（路由表挂不上 ⇒ 宿主回 401）')
+  }
 
   const names = registered.map((t) => t.name)
   const want = [

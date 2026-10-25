@@ -756,47 +756,17 @@ export function apply(ctx, config) {
     } catch { return false }
   }
 
-  // DSH 自己的信任栅栏（真鉴权，认 cookie/token）：
-  // requestRejection({ headers }) → undefined = 放行；数字 = 回那个状态码（通常 401）
-  let connCached = null
-  let connTried = false
-  let fenceWarned = false
-  const getConnection = () => {
-    if (connTried) return connCached
-    connTried = true
-    for (const [how, fn] of [
-      ['ctx.get("connection")', () => (typeof ctx.get === 'function' ? ctx.get('connection') : null)],
-      ['Reflect.get(ctx, "connection")', () => Reflect.get(ctx, 'connection')],
-      ['ctx.root.connection', () => (ctx.root && typeof ctx.root === 'object' ? ctx.root.connection : null)],
-    ]) {
-      try {
-        const c = fn()
-        if (c && typeof c.requestRejection === 'function') { connCached = c; log('信任栅栏：用 ' + how + ' 拿到了 connection 服务 ✓'); return c }
-      } catch { /* 换下一个 */ }
-    }
-    log('⚠️ 三种写法都拿不到 connection.requestRejection ⇒ 退回"本机同源"这一道')
-    return null
-  }
-  const fenceReject = (req, res) => {
-    const conn = getConnection()
-    if (!conn) {
-      if (!fenceWarned) { fenceWarned = true; log('⚠️ 拿不到 DSH 信任栅栏（connection.requestRejection）⇒ 退回本机同源这一道') }
-      return false
-    }
-    try {
-      const rejection = conn.requestRejection({ headers: req.headers })
-      if (rejection === undefined) return false
-      try {
-        res.writeHead(rejection, { 'content-type': 'text/plain; charset=utf-8' })
-        res.end()
-      } catch { /* 连接已断 */ }
-      return true
-    } catch (err) {
-      log('信任栅栏调用出错，按不通过处理：' + String(err?.message ?? err))
-      try { res.writeHead(403); res.end() } catch { /* 忽略 */ }
-      return true
-    }
-  }
+  // ⚠️ 这里**故意不调** DSH 的信任栅栏（connection.requestRejection）。
+  //
+  //   2026-10-25 的教训：加过一版栅栏，curl 打 /api/douyin-duty/status 拿到 401（**空 body**），
+  //   而宿主自己的 401 永远带一句 "dsh web authentication required"。空 body 就是栅栏自己
+  //   写出来的 —— 说明路由早就挂上了，是栅栏把请求拦掉了。
+  //
+  //   宿主里真正在跑、且**确认可用**的同类插件是 bili 2.0.4：它只做本机同源这一道，
+  //   不碰栅栏。跟它保持一致，别再造一个"看起来更安全、其实把设置页也挡了"的闸。
+  //   dshmarket 的源码也印证：宿主自己那道 /api 前缀栅栏管不到插件自己的前缀路由，
+  //   插件要么自己调、要么像 bili 一样只做同源 —— 我们选后者。
+  const fenceReject = () => false
 
   const handle = async (req, res, url) => {
     const path = url.pathname

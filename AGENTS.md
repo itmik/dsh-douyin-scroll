@@ -35,7 +35,28 @@ Node 里 `fetch` 抖音接口 → 404 `Unsupported path(Janus)`，哪怕 cookie 
 章程里提到的每个写动作都必须能对上其中一个工具 —— 改了章程忘了加工具，那一轮就什么都写不出来
 （这个坑在 v0.1.0 真踩过：章程说"写进 out/…"，但那一轮根本没有能写文件的工具）。
 
-## 两条真出过事的坑
+## 三条真出过事的坑
+
+### 设置页 401：路由形状不对 + 别自己加"信任栅栏"
+
+症状：设置页红字 **"读不到状态：HTTP 401"**，整页不可用。
+
+两个原因叠在一起：
+
+1. **路由必须用 `{ kind: 'prefix', path, handler }` 注册。**
+   老式 `webServer.register((req, res) => …)` 在这个宿主里不进路由表，
+   请求落到宿主自己的 `/api` 闸上 ⇒ 一律 401，body 是
+   `dsh web authentication required; reopen the URL printed by dsh web.`
+2. **不要在这个插件里调 `connection.requestRejection()`。**
+   加过一版"信任栅栏"，结果 curl 打 `/api/douyin-duty/status` 拿到
+   **401 + 空 body** —— 空 body 就是栅栏自己 `writeHead(401)+end()` 写出来的。
+   宿主自己的 401 永远带上面那句话，所以
+   **"401 有没有 body" 就是分辨谁在拦的分水岭**。
+   宿主里真正在跑、且确认可用的同类插件是 bili **2.0.4**：它只做"本机同源"这一道。
+   照它做 —— 别自作聪明加一道"看着更安全、其实连设置页也挡"的闸。
+
+> `ctx.effect(fn, label)` 在这个宿主里**会立即执行** `fn`（bili 的路由就是这么挂的），
+> 也支持只当 teardown 登记（`fn` 返回清理函数）。两种都行；路由直接 `register` 最不容易想错。
 
 ### `dsh` 在桌面上是个 `.cmd`，不能直接 spawn
 

@@ -33,9 +33,10 @@ const ctx = {
   logger,
   // 真 host 里这是个函数：get('dshHomePath')('douyin-duty') → <DSH_HOME>/douyin-duty
   get: (k) => (k === 'dshHomePath' ? (...seg) => join(ROOT, ...seg) : undefined),
-  effect: () => {},
+  // 真 host 里 effect(fn, label) 会**立即执行** fn（bili 2.0.4 的路由就是这么挂的）
+  effect: (fn) => { try { return fn() } catch { return undefined } },
   tools: { register: (t) => { tools.set(t.name, t); return t } },
-  webServer: { register: (fn) => { route = fn } },
+  webServer: { register: (spec) => { route = spec } },
   settings: { describe: () => ({}), update: (p) => p },
 }
 
@@ -65,7 +66,7 @@ if (!route) {
   console.log('\n✗ 没拿到 webServer 路由')
   process.exitCode = 1
 } else {
-  const call = (method, url) => new Promise((resolve) => {
+  const call = (method, url) => new Promise(async (resolve) => {
     const chunks = []
     const res = {
       statusCode: 0,
@@ -77,7 +78,9 @@ if (!route) {
       write(s) { chunks.push(s) },
     }
     const req = { method, url, headers: {}, on: (e, fn) => { if (e === 'end') fn() } }
-    route(req, res)
+    // route 可能是 {kind,path,handler} 对象，也可能是老的函数形状
+    if (typeof route === 'function') route(req, res)
+    else await route.handler(req, res)
     setTimeout(() => resolve({ status: res.statusCode, body: chunks.join('') || '(no response)' }), 8000)
   })
 

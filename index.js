@@ -816,9 +816,8 @@ export function apply(ctx, config) {
       kind: 'prefix',
       path: '/api/douyin-duty',
       handler: async (req, res) => {
-        // ① 先过 DSH 的信任栅栏（真鉴权，返回 401 的那个机制）
+        // 只有这一道：本机同源（跟宿主里跑着的 bili 2.0.4 一模一样）
         if (fenceReject(req, res)) return
-        // ② 再过本机同源（栅栏拿不到时的兜底，也挡浏览器里别的网页）
         if (!sameOriginOk(req)) {
           try { sendJson(res, 403, { ok: false, error: '只接受本机同源请求' }) } catch { /* 忽略 */ }
           return
@@ -839,7 +838,7 @@ export function apply(ctx, config) {
     } else {
       register()
     }
-    log('HTTP 路由已挂载：/api/douyin-duty（prefix + 信任栅栏）')
+    log('HTTP 路由已挂载：/api/douyin-duty（prefix + 本机同源）')
   } catch (e) {
     // 宿主只认函数形式的老接口就降级用它（行为一样，只是没走 effect 生命周期）
     if (ctx.webServer?.register) {
